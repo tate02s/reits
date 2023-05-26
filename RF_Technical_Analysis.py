@@ -1,82 +1,99 @@
-import yfinance as yf
-import numpy as np
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
+import yahoofinancials as financials
+import yfinance as priceData
+from collections import defaultdict
 
-
-"""Finding the optimal paramaters for all indicator for a specific industry. back testing those stratigies with historical data. Performing Monte Carlo simulations  """
-
-class MarketData:
-    def __init__(self, tickers, start, end, period='1d'):
-        self.tickers = tickers
+class TechnicalAnalysis:
+    def __init__(self, stocks, start, end, interval='daily'):
+        self.stocks = stocks
         self.start = start
         self.end = end
-        self.period = period
-    
-    def getMarketData(self):
-        data = []
-        for ticker in self.tickers:
-            pa = yf.Ticker(ticker).history(period=self.period, start=self.start, end=self.end)
-            del pa['Dividends']
-            del pa['Stock Splits']
-            pa['Symbol'] = ticker
-            data.append(pa)
+        self.interval = interval
+
+    def df(self):
+        stockDict = {}
+        for stock in self.stocks:
+            stockData = priceData.Ticker(stock).history(period=self.interval, start=self.start, end=self.end)
+
+            # Make a columns that designates what stock the row data belongs to
+            stockData['Ticker'] = stock
+
+            # Delete the Dividend and Stock Split columns
+            del stockData['Dividends']
+            del stockData['Stock Splits']
+
+            # Calculate the change in share price
+            stockData['% Change'] = np.log(stockData['Close']/stockData['Close'].shift())
+
+            # Indicate if the day's movement was an increase or decrease
+
+            close = stockData.groupby('Ticker')['Close']
+            stockData['Increase'] = close.transform(lambda x: np.sign(x.diff()))
+
+            # Calculate the MACD Indicator
+            self.calMACD(stockData, close)
+            
+            # Calculates the day's volitility
+            self.calVolitility(stockData)
+
+            # Calculate the RSI
+            self.calRSI(stockData)
+
+            # Calculate the Stochasic Oscillator
+            self.calStochOsc(stockData)
+
+            # Calculate Williams Oscillator
+            self.calWilliamsPercR(stockData)
+
+            # Calculate the price rate of change
+            self.calPROC(stockData)
+
+            #Calculate the On Balance Volume:
+
+            self.calOBV(stockData)
 
 
-        priceDF = pd.concat(data)
+            stockDict[stock] = stockData
 
-        close = priceDF.groupby('Symbol')['Close']
-        priceDF['Prediction'] = close.transform(lambda x: np.sign(x.diff()))
-        
-        #Get the % change in price
-        priceDF['% Change'] = close.transform(lambda x: (x - x.shift(1)) / x.shift(1))
 
-        self.calMACD(priceDF, close)
-        self.calVolitility(priceDF)
-        self.calRSI(priceDF)
-        self.calStochOsc(priceDF)
-        self.calWilliamsPercR(priceDF)
-        self.calPROC(priceDF)
+        df = pd.concat([df for df in stockDict.values()])
 
-        #Calculate the On Balance Volume:
-        obv_groups = priceDF.groupby('Symbol').apply(self.calOBV)
-        obvDF = pd.DataFrame(obv_groups, columns=['OBV']).reset_index(level=0)
-        priceDF = priceDF.merge(obvDF, left_on='Symbol', right_on='Symbol')
-
-        #Return the DF
-
-        return priceDF.dropna()
+        return df.dropna(axis=0)
     
     def calMACD(self, priceDF, close):
         ema12 = close.transform(lambda x: x.ewm(span=12, adjust=False).mean())
         ema26 = close.transform(lambda x: x.ewm(span=26, adjust=False).mean())
         priceDF['MACD'] = ema26 - ema12
-        macd = priceDF.groupby('Symbol')['MACD']
+        macd = priceDF.groupby('Ticker')['MACD']
         priceDF['MACD Signal'] = macd.transform(lambda x: x.ewm(span=9, adjust=False).mean())
         priceDF['Closing 50EMA'] = close.transform(lambda x: x.ewm(com=50).mean())
 
+        # When the MACD > MACD Signal, ie when the MACD is net positive, then a buy signal commences
         priceDF['MACD'] = priceDF['MACD'] - priceDF['MACD Signal']
         del priceDF['MACD Signal']
 
-    
     def calVolitility(self, priceDF):
+        """Calculates the difference between the candle tails - the difference between the open and close, with respect to the previous day's close"""
         #Define volitility as the difference between the highs - lows, with respect to the difference between the opens - closes
-        priceDF['Volitility'] = ((priceDF['High'] - priceDF['Low']) - abs(priceDF['Close'] - priceDF['Open'])) / priceDF['Close']
+        priceDF['Volitility'] = ((priceDF['High'] - priceDF['Low']) - abs(priceDF['Close'] - priceDF['Open'])) / priceDF['Close'].diff()
 
+    def calRSI(self, priceDF, daysInterval=14):
+        """Calculates the RSI for the days interval provided"""
 
-    def calRSI(self, priceDF):
         #Calculate the RSI 
-        percChange = priceDF.groupby('Symbol')['% Change']
+        percChange = priceDF.groupby('Ticker')['% Change']
         rsiData = []
         for symbol in percChange.groups:
-
+            
             positive = percChange.get_group(symbol).copy()
             negative = percChange.get_group(symbol).copy()
 
             positive[positive < 0] = 0
             negative[negative > 0] = 0
 
-            days = 14
+            days = daysInterval
 
             averageGain = positive.rolling(window=days).mean()
             averageLoss = abs(negative.rolling(window=days).mean())
@@ -86,14 +103,15 @@ class MarketData:
             rsiData.extend([*RSI])
         
         priceDF['RSI'] = rsiData
-    
-    def calStochOsc(self, priceDF):
-        """Calculate the stochastic Oscillator"""
-        n = 14
-        low_14, high_14 = priceDF[['Symbol', 'Low']].copy(), priceDF[['Symbol', 'High']].copy()
 
-        low_14 = low_14.groupby('Symbol')['Low'].transform(lambda x: x.rolling(window = n).min())
-        high_14 = high_14.groupby('Symbol')['High'].transform(lambda x: x.rolling(window = n).max())
+    
+    def calStochOsc(self, priceDF, n=14):
+        """Calculate the stochastic Oscillator"""
+
+        low_14, high_14 = priceDF[['Ticker', 'Low']].copy(), priceDF[['Ticker', 'High']].copy()
+
+        low_14 = low_14.groupby('Ticker')['Low'].transform(lambda x: x.rolling(window = n).min())
+        high_14 = high_14.groupby('Ticker')['High'].transform(lambda x: x.rolling(window = n).max())
 
         k_percent = 100 * ((priceDF['Close'] - low_14) / (high_14 - low_14))
 
@@ -101,32 +119,31 @@ class MarketData:
         priceDF['High_14'] = high_14
         priceDF['K_Percent'] = k_percent
 
-    def calWilliamsPercR(self, priceDF):
+    def calWilliamsPercR(self, priceDF, n=14):
         """Calculate the Williams % R"""
-        n = 14
-        low_14, high_14 = priceDF[['Symbol', 'Low']].copy(), priceDF[['Symbol', 'High']].copy()
 
-        low_14 = low_14.groupby('Symbol')['Low'].transform(lambda x: x.rolling(window=n).min())
-        high_14 = high_14.groupby('Symbol')['High'].transform(lambda x: x.rolling(window=n).max())
+        low_14, high_14 = priceDF[['Ticker', 'Low']].copy(), priceDF[['Ticker', 'High']].copy()
+
+        low_14 = low_14.groupby('Ticker')['Low'].transform(lambda x: x.rolling(window=n).min())
+        high_14 = high_14.groupby('Ticker')['High'].transform(lambda x: x.rolling(window=n).max())
 
         r_percent = ((high_14 - priceDF['Close']) / (high_14 - low_14)) * -100
 
         priceDF['R_Percent'] = r_percent
-
-    def calPROC(self, priceDF):
+    
+    def calPROC(self, priceDF, n=9):
         """Calculate the Price Rate of Change"""
-        n = 9
-        priceDF['PROC'] = priceDF.groupby('Symbol')['Close'].transform(lambda x: x.pct_change(periods = n))
         
-    def calOBV(self, group):
-        """Calculate the OBV"""
-        volume = group['Volume']
-        change = group['Close'].diff()
+        priceDF['PROC'] = priceDF.groupby('Ticker')['Close'].transform(lambda x: x.pct_change(periods = n))
 
-        prev_obv = 0
+    def calOBV(self, stockData):
+        """Calculate the OBV"""
+
         obv_values = []
 
-        for i, j in zip(change, volume):
+        prev_obv = 0
+
+        for i, j in zip(stockData['Close'].diff(), stockData['Volume']):
 
             if i > 0:
                 current_obv = prev_obv + j
@@ -136,59 +153,58 @@ class MarketData:
                 current_obv = prev_obv
 
             prev_obv = current_obv
+
             obv_values.append(current_obv)
-        
-        #Convert the symbols to another column and then perform a merge on the symbol columns for this data frame and the priceDF.
 
-        return pd.Series(obv_values, index=group.index)
+        # print(pd.Series(obv_values))
+        stockData['OBV'] = np.array(obv_values)
     
-
-    def backTest(self, marketDF, startingBalance, indicators):
-        testBalance = startingBalance
-        ltHold = startingBalance
-        buyMode = False
-        # Only change the balance when Long = True
-        for i, changePercent in enumerate(marketDF['% Change']):
-            if buyMode == True:
-                if marketDF[indicators[0]][i] >= 60 and marketDF[indicators[1]][i] < marketDF[indicators[2]][i] and marketDF['Close'][i] > marketDF[indicators[3]][i]:
-                    buyMode = False
-                else:
-                    testBalance *= (1 + changePercent)
-            else:
-                if marketDF[indicators[0]][i] <= 20 and marketDF[indicators[1]][i] > marketDF[indicators[2]][i] and marketDF['Close'][i] < marketDF[indicators[3]][i]:
-                    buyMode = True
-
-            #Change the lt hold balance for the entire duration, as its never not in the market
-            ltHold *= (1 + changePercent)
-
-
-        return f'MACD performance {testBalance/startingBalance} lt hold performance {ltHold/startingBalance}'
-    
-    def getReturns(self):
-
-        closes = self.getMarketData().groupby('Symbol')['Close']
-        returns = {}
-        for symbol in closes.groups:
-            startVal = closes.get_group(symbol)[0]
-            endVal = closes.get_group(symbol)[-1]
-            print(f'symbol: {symbol} start val: {startVal}, end val: {endVal}')
-            growthRate = (endVal / startVal) - 1
-
-            returns[symbol] = growthRate
         
-        return returns
+reits = TechnicalAnalysis(['COLD', 'CCI'], '2023-01-01', '2023-03-01')
+reits_data = reits.df()
+# print(reits_data)
 
-        
-industryDict = {
-    'mortgageTickers': ['AAIC', 'ABR', 'ACRE', 'AGNC', 'AGNCL'],
-    'socialMediaTickers': ['SNAP', 'META', 'PINS'],
-    'shipping': ['NAT', 'TNK'],
-    'prop&casInsurance': ['AFG', 'ALL', 'AXS', 'CINF'],
-    'hotels': ['MAR', 'WH', 'CHH', 'HTHT', 'IHG'],
-    'groceryStores': ['ACI', 'ASAI', 'KR', 'GO', 'SFM'],
-    'gambling': ['ACEL', 'AGS', 'CHDN', 'DKNG', 'GAMB', 'IGT'],
-}
+# Import the required objects for RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.metrics import roc_curve, roc_auc_score, accuracy_score, classification_report
 
-a = MarketData(industryDict['hotels'], '2017-11-01', '2023-01-01')
-stocksDF = a.getMarketData()
-print(stocksDF)
+X_Cols = reits_data[['RSI', 'MACD', 'OBV']]
+Y_Cols = reits_data['Increase']
+print(X_Cols, Y_Cols)
+
+#Split X and y into X_
+X_train, X_test, y_train, y_test = train_test_split(X_Cols, Y_Cols, random_state=0)
+
+#Create a Random Forest Classifier
+"""The 'criterion' parameter of RandomForestClassifier must be a str; the optiond are: log_loss, entropy, gini"""
+randForestClf = RandomForestClassifier(n_estimators = 100, oob_score = True, criterion='gini', random_state=0)
+randForestClf.fit(X_train, y_train)
+
+#Make predications
+
+y_pred = randForestClf.predict(X_test)     
+print(f'Correct Prediction (%): ', accuracy_score(y_test, randForestClf.predict(X_test), normalize = True) * 100) 
+
+targetNames = ['Up Day', 'Down Day']
+
+#Builds a classification report
+report = classification_report(y_true=y_test, y_pred=y_pred, target_names=targetNames, output_dict = True)
+reportDF = pd.DataFrame(report).transpose()
+print(reportDF)
+
+featureImportance = pd.Series(randForestClf.feature_importances_, index=X_Cols.columns).sort_values(ascending=False)
+
+x_values = list(range(len(randForestClf.feature_importances_)))
+cumulativeImportances = np.cumsum(featureImportance.values)
+
+plt.plot(x_values, cumulativeImportances, 'g-')
+plt.hlines(y=0.95, xmin=0, xmax=len(featureImportance), color='r', linestyles = 'dashed')
+plt.xticks(x_values, featureImportance.index, rotation = 'vertical')
+
+plt.xlabel('Variable')
+plt.ylabel('Cumulative Importance')
+plt.title('Random Forest: Feature Importance Graph')
+
+plt.show()
