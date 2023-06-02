@@ -164,6 +164,7 @@ reits = TechnicalAnalysis(['COLD', 'CCI'], '2023-01-01', '2023-03-01')
 reits_data = reits.df()
 # print(reits_data)
 
+#   ------------------------------------------------------------------------
 # Import the required objects for RandomForestClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
