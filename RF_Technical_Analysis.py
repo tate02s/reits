@@ -209,3 +209,230 @@ plt.ylabel('Cumulative Importance')
 plt.title('Random Forest: Feature Importance Graph')
 
 plt.show()
+
+
+#-----------------------------------------------------------------------------------------
+
+
+import matplotlib.pyplot as plt
+
+import numpy as np
+import pandas as pd
+from empiricaldist import Pmf
+from scipy.stats import ttest_1samp
+from scipy.stats._kde import gaussian_kde
+from collections import defaultdict
+
+reits_data = pd.read_csv("reits_data.csv").groupby("Ticker")["Close"]
+
+# for ticker in reits_data.groups:
+#     print(f"ticker: {ticker}")
+#     plt.plot([price for price in reits_data.get_group(ticker)])
+#     plt.show()
+        
+
+class TrendProcessor:
+    def __init__(self, closing_price_groups):
+        self.groups = closing_price_groups
+        self.returns_dict = {}
+        self.pmf_intervals = {}
+        self.trend_pmfs = defaultdict(list)
+        self.grouped_intervals = defaultdict(list)
+
+    def _gen_returns(self):
+        """Generate the returns for all ticker's closing prices"""
+        self.returns_dict = {}
+        for ticker, closing_prices in self.groups:
+
+            ret = np.log(closing_prices/closing_prices.shift()).dropna()
+            self.returns_dict[ticker] = ret
+
+        
+    def _split_into_intervals(self, min_sample=20):
+
+        for ticker, returns in self.returns_dict.items():
+            self.returns_dict[ticker] = [round(returns[i:i+min_sample], 3) for i in range(0, len(returns), min_sample)]
+
+    def _interval_kde(self, return_interval, return_range=(-0.1, 0.1)):
+        """Return a pmf estimated by a Gaussian kde for the provided interval"""
+        hypos = [x for x in np.linspace(return_range[0], return_range[1])]
+
+        kde = gaussian_kde(return_interval)
+        probs = kde.pdf(hypos)
+
+        returns_pmf = Pmf(probs, hypos)
+        returns_pmf.normalize()
+
+        # plt.plot(returns_pmf)
+        # plt.show()
+
+        return returns_pmf
+        
+        
+    def _create_interval_pmfs(self):
+        """Create pmfs for every interval for every ticker"""
+        for ticker, returns_list in self.returns_dict.items():
+            pmf_intervals = []
+            for return_interval in returns_list:
+                pmf = self._interval_kde(return_interval)
+                pmf_intervals.append(pmf)
+
+            self.pmf_intervals[ticker] = pmf_intervals
+
+
+    def _check_compatability(self, reject_thresh=0.7):
+        """Test if the two samples of returns come from a different distribution."""
+
+
+# t = TrendProcessor(reits_data)
+# t._gen_returns()
+# t._split_into_intervals()
+# t._create_interval_pmfs()
+# t._check_compatability()
+# # t._retrieve_return_intervals()
+# # print(t.grouped_intervals)
+# print(t.trend_pmfs)
+#----------------------------------------------------------------------------------------
+
+COLD_CLOSINGS = reits_data.get_group("COLD")
+CCI_CLOSINGS = reits_data.get_group("CCI")
+
+class MACD:
+    def __init__(self, prices, longer_days=2, shorter_days=1):
+        self.prices = prices
+        self.longer_days = longer_days
+        self.shorter_days = shorter_days
+
+    def ema_smoothing(self, adjust=True):
+        """Create an exponential moving average for a stock"""
+
+        longer_ema = self.prices.transform(lambda x: x.ewm(span=self.longer_days, adjust=adjust).mean())
+        shorter_ema = self.prices.transform(lambda x: x.ewm(span=self.shorter_days, adjust=adjust).mean())
+
+        return (longer_ema, shorter_ema)
+    
+macd = MACD(CCI_CLOSINGS)
+emas = macd.ema_smoothing()
+
+class Simulate:
+    def __init__(self, prices, short_days_range, longer_days_range):
+        self.prices = prices
+        self.sr = short_days_range
+        self.lr = longer_days_range
+        self.macd_combos = []
+        self.macds = []
+
+    def calRSI(self, daysInterval=6):
+        """Calculates the RSI for the days interval provided"""
+
+        log_returns = np.log(self.stock_df[self.price_type]/self.stock_df[self.price_type].shift()).dropna()
+            
+        positive = log_returns.copy()
+        negative = log_returns.copy()
+
+        positive[positive < 0] = 0
+        negative[negative > 0] = 0
+
+        days = daysInterval
+
+        averageGain = positive.rolling(window=days).mean()
+        averageLoss = abs(negative.rolling(window=days).mean())
+
+        # print(averageGain, averageLoss)
+
+        relativeStrength = averageGain / averageLoss
+        relativeStrength[relativeStrength.isna()] = 0
+
+        RSI = 100 - (100 /(1 + relativeStrength))
+        
+        self.RSI = np.round(RSI, 2)
+
+    def possible_macds(self):
+        """long signal, short signal combos for macd"""
+
+        for s in self.sr:
+            for l in self.lr:
+                pair = (l, s)
+                self.macd_combos.append(pair)
+
+    
+    def create_possible_macds(self):
+        
+        for ldays, sdays in self.macd_combos:
+            self.macds.append(MACD(self.prices, ldays, sdays))
+
+    def simulate_holdings(self, principle=1):
+
+        current_values = []
+        returns = np.log(self.prices/self.prices.shift()).dropna()
+
+        for macd in self.macds:
+            emas = macd.ema_smoothing()
+            print(f"long signal: {macd.longer_days}, short signal: {macd.shorter_days}")
+            current_value = principle
+
+            for i, return_ind in enumerate(returns.index):
+                if i < len(returns):
+                    #   ***When the shorter ema (stock price) is greater than the longer ema (2 day ema)***
+                    if emas[1][return_ind] > emas[0][return_ind]:
+
+                        current_value *= (1 + returns[return_ind])
+            
+            current_values.append(current_value)
+            print(current_value)
+
+        return current_values
+    
+    def buy_and_hold(self, principle = 1):
+        returns = np.log(self.prices/self.prices.shift()).dropna()
+
+        current_value = principle
+
+        for i, return_ind in enumerate(returns.index):
+            if i < len(returns):
+                current_value *= (1 + returns[return_ind])
+        
+        print(f"Buy and hold profit: {current_value} starting at: {principle}")
+
+
+
+    
+# s = Simulate(COLD_CLOSINGS, [1], [2])
+# s.possible_macds()
+# s.create_possible_macds()
+# profitability = s.simulate_holdings()
+# bh = s.buy_and_hold()
+
+
+m = MACD(COLD_CLOSINGS, 2, 1)
+macd_signals = m.ema_smoothing()
+
+# plt.plot(COLD_CLOSINGS)
+# plt.plot(macd_signals[0])
+
+# plt.show()
+
+import yfinance as yf
+
+prices = ["Open", "Close"]
+tickers2watch = ["NAT", "SPY", "BIG", "RDFN", "FREE", "PLYM", "CWK", "LC", "AAN", "GRPN", 'GOOS', 'AAP', 'LL', 'WD', 'wrby', 'MCK', 'WOLF', 'AME']
+
+for t in tickers2watch[:1]:
+    BIG = yf.Ticker(t).history(interval="1d", start="2023-06-01", end="2024-01-30")
+    BIG_CLOSINGS = BIG[prices[1]]
+
+    s = Simulate(BIG_CLOSINGS, [1], [2])
+    s.possible_macds()
+    s.create_possible_macds()
+    profitability = s.simulate_holdings()
+    bh = s.buy_and_hold()
+
+    BIG_M = MACD(BIG_CLOSINGS, 2, 1)
+    BIG_SIGNALS = BIG_M.ema_smoothing()
+
+    print(f"Viewing current ticker: {t}")
+
+    plt.plot(BIG_CLOSINGS)
+    plt.plot(BIG_SIGNALS[0])
+
+    plt.show()
